@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Neon Hockey Online: P2P Edition</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body { margin: 0; background: #000; color: #fff; font-family: 'Arial Black', sans-serif; overflow: hidden; touch-action: none; }
+        canvas { display: block; }
+        #menu { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 100; text-align: center; overflow-y: auto; padding: 20px; box-sizing: border-box; }
+        h1 { color: #00ff88; font-size: 32px; margin: 0 0 10px 0; text-shadow: 0 0 20px #00ff88; }
+        
+        .room-info { background: #111; padding: 20px; border-radius: 15px; border: 2px solid #00ff88; margin-bottom: 20px; width: 300px; }
+        .id-display { font-size: 24px; color: #00ff88; margin: 10px 0; letter-spacing: 2px; }
+        
+        .settings { margin-bottom: 20px; background: #111; padding: 15px; border-radius: 15px; border: 1px solid #333; font-size: 14px; }
+        input[type="text"] { width: 200px; padding: 10px; border-radius: 5px; border: none; margin-bottom: 10px; text-align: center; font-size: 18px; }
+        
+        .mode-btn { font-size: 18px; padding: 15px; cursor: pointer; background: #222; color: #fff; border: 2px solid #444; border-radius: 50px; font-weight: bold; transition: 0.2s; width: 300px; margin-bottom: 10px; }
+        .mode-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .host-btn { background: #00ff88; color: #000; border: none; }
+
+        #ui { position: fixed; top: 10px; width: 100%; display: flex; justify-content: center; gap: 50px; font-size: 50px; opacity: 0.5; pointer-events: none; z-index: 10; }
+        #status-msg { position: fixed; top: 80px; width: 100%; text-align: center; color: #00ff88; font-size: 18px; z-index: 10; }
+        #win-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: none; flex-direction: column; align-items: center; justify-content: center; z-index: 200; }
+    </style>
+</head>
+<body>
+
+<div id="ui"><span id="s1">0</span> - <span id="s2">0</span></div>
+<div id="status-msg">サーバー接続中...</div>
+
+<div id="menu">
+    <h1>NEON HOCKEY ONLINE</h1>
+    
+    <div class="room-info">
+        <div>あなたのルームコード</div>
+        <div id="my-id" class="id-display">取得中...</div>
+    </div>
+
+    <div class="settings">
+        <input type="text" id="join-id" placeholder="相手のコードを入力">
+        <button class="mode-btn" id="connect-btn" onclick="connectToPeer()">相手に接続する</button>
+    </div>
+
+    <div id="host-controls" style="display:none;">
+        <div class="settings">
+            <label><input type="checkbox" id="enableItems" checked> アイテム</label>
+            <label><input type="checkbox" id="enableSkills" checked> スキル</label>
+            <label>スコア: <input type="number" id="winScore" value="5" style="width:40px;"></label>
+        </div>
+        <button class="mode-btn host-btn" id="start-btn" onclick="sendStartSignal()">ゲーム開始 (ホストのみ)</button>
+    </div>
+    
+    <div id="wait-msg" style="display:none; color:#00ccff;">相手の開始待ち...</div>
+</div>
+
+<div id="win-screen">
+    <h2 id="win-text" style="font-size:50px;">WIN!</h2>
+    <button class="mode-btn" onclick="location.reload()">メニューに戻る</button>
+</div>
+
+<canvas id="game"></canvas>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const statusMsg = document.getElementById('status-msg');
+
+let peer, conn;
+let isHost = false;
+let myId = "";
+let w, h, balls = [], p1, p2, items = [], particles = [], gameActive = false;
+let score = [0, 0], targetWinScore = 5;
+let useItems = true, useSkills = true;
+
+const P_RAD = 35;
+
+// --- PeerJS 通信設定 ---
+peer = new Peer();
+
+peer.on('open', (id) => {
+    myId = id;
+    document.getElementById('my-id').innerText = id.substring(0, 6).toUpperCase();
+    statusMsg.innerText = "接続待機中...";
+});
+
+// 2P（ゲスト）が接続してきた時（1P側の処理）
+peer.on('connection', (c) => {
+    conn = c;
+    isHost = true;
+    setupChat();
+    statusMsg.innerText = "プレイヤーが参加しました！";
+    document.getElementById('host-controls').style.display = 'block';
+});
+
+function connectToPeer() {
+    const targetId = document.getElementById('join-id').value.toLowerCase();
+    // 実際にはPeerIDは長いので、簡易化せずそのままか、短縮IDの検索ロジックが必要ですが、
+    // ここでは入力されたIDにそのまま接続します。
+    statusMsg.innerText = "接続中...";
+    conn = peer.connect(targetId);
+    conn.on('open', () => {
+        isHost = false;
+        setupChat();
+        statusMsg.innerText = "ホストに接続完了！";
+        document.getElementById('wait-msg').style.display = 'block';
+        document.getElementById('connect-btn').disabled = true;
+    });
+}
+
+function setupChat() {
+    conn.on('data', (data) => {
+        if (data.type === 'start') {
+            applySettings(data.settings);
+            startGameLogic();
+        } else if (data.type === 'sync') {
+            // 位置同期
+            if (isHost) {
+                p2.x = data.p2.x; p2.y = data.p2.y;
+            } else {
+                p1.x = data.p1.x; p1.y = data.p1.y;
+                balls = data.balls;
+                score = data.score;
+                items = data.items;
+            }
+        }
+    });
+}
+
+// --- ゲームロジック ---
+function init() {
+    w = canvas.width = window.innerWidth; h = canvas.height = window.innerHeight;
+    const base = { lx:0, ly:0, x:0, y:h/2, r:P_RAD, color:'#ff0055' };
+    p1 = { ...base, x:100, color:'#ff0055' };
+    p2 = { ...base, x:w-100, color:'#00ccff' };
+}
+
+function sendStartSignal() {
+    const settings = {
+        useItems: document.getElementById('enableItems').checked,
+        useSkills: document.getElementById('enableSkills').checked,
+        winScore: parseInt(document.getElementById('winScore').value)
+    };
+    conn.send({ type: 'start', settings: settings });
+    applySettings(settings);
+    startGameLogic();
+}
+
+function applySettings(s) {
+    useItems = s.useItems;
+    useSkills = s.useSkills;
+    targetWinScore = s.winScore;
+}
+
+function startGameLogic() {
+    document.getElementById('menu').style.display = 'none';
+    gameActive = true;
+    init();
+    if (isHost) createBall();
+    update();
+}
+
+function createBall() {
+    if (!isHost) return;
+    balls.push({ x:w/2, y:h/2, vx:7, vy:7, r:12 });
+}
+
+canvas.addEventListener('pointermove', e => {
+    if (!gameActive) return;
+    if (isHost) {
+        p1.x = e.clientX; p1.y = e.clientY;
+        if (p1.x > w/2 - 40) p1.x = w/2 - 40;
+    } else {
+        // 2Pは右側固定
+        p2.x = e.clientX; p2.y = e.clientY;
+        if (p2.x < w/2 + 40) p2.x = w/2 + 40;
+    }
+});
+
+function update() {
+    if(!gameActive) return;
+
+    if (isHost) {
+        // ボールの計算はホストのみが行う（ラグ防止）
+        balls.forEach(b => {
+            b.x += b.vx; b.y += b.vy;
+            if(b.y < b.r || b.y > h - b.r) b.vy *= -1;
+            
+            [p1, p2].forEach(p => {
+                if (Math.hypot(b.x - p.x, b.y - p.y) < b.r + p.r) {
+                    b.vx *= -1.1; // 跳ね返り
+                    b.x += b.vx * 2;
+                }
+            });
+
+            if (b.x < 0) { score[1]++; b.x = w/2; b.vx = 7; }
+            if (b.x > w) { score[0]++; b.x = w/2; b.vx = -7; }
+        });
+
+        // ゲストにデータを送信
+        conn.send({
+            type: 'sync',
+            p1: {x: p1.x, y: p1.y},
+            balls: balls,
+            score: score,
+            items: items
+        });
+    } else {
+        // ゲストは自分の位置をホストに送信
+        conn.send({
+            type: 'sync',
+            p2: {x: p2.x, y: p2.y}
+        });
+    }
+
+    draw();
+    if (score[0] >= targetWinScore || score[1] >= targetWinScore) {
+        gameActive = false;
+        document.getElementById('win-screen').style.display = 'flex';
+        document.getElementById('win-text').innerText = score[0] > score[1] ? "P1 WIN" : "P2 WIN";
+    } else {
+        requestAnimationFrame(update);
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#000'; ctx.fillRect(0,0,w,h);
+    ctx.strokeStyle = '#333'; ctx.strokeRect(w/2, 0, 1, h);
+    
+    [p1, p2].forEach(p => {
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+        ctx.fillStyle = p.color; ctx.fill();
+    });
+    
+    balls.forEach(b => {
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+        ctx.fillStyle = '#fff'; ctx.fill();
+    });
+
+    document.getElementById('s1').innerText = score[0];
+    document.getElementById('s2').innerText = score[1];
+}
+
+window.onresize = init;
+</script>
+</body>
+</html>
